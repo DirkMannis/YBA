@@ -3,3 +3,4 @@ requests
 pandas
 flask
 web3
+beautifulsoup4
