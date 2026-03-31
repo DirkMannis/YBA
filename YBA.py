@@ -53,49 +53,53 @@ def get_debank_position():
         f"https://pro-openapi.debank.com/v1/user/all_complex_protocol_list?id={WALLET}",
         f"https://pro-openapi.debank.com/v1/user/complex_protocol_list?id={WALLET}"
     ]
-    
     headers = {"AccessKey": DEBANK_KEY}
     
     for url in urls:
         try:
-            print(f"Trying DeBank URL: {url}")
+            print(f"\n🔍 Trying DeBank URL: {url}")
             resp = requests.get(url, headers=headers, timeout=20)
             print(f"Status Code: {resp.status_code}")
             
             if resp.status_code != 200:
-                print(f"Error response: {resp.text[:500]}")
+                print(f"Error body: {resp.text[:600]}...")
                 continue
                 
             data = resp.json()
-            print(f"Response type: {type(data)}, length: {len(str(data)) if isinstance(data, (dict, list)) else 'N/A'}")
+            print(f"Response type: {type(data)} | Length: {len(data) if isinstance(data, list) else 'N/A'}")
             
-            # If it's a list, iterate protocols
             protocols = data if isinstance(data, list) else [data]
             
-            for protocol in protocols:
+            for idx, protocol in enumerate(protocols):
                 name = str(protocol.get("name", "")).lower()
-                print(f"Found protocol: {name}")
+                chain = str(protocol.get("chain", "")).lower()
+                print(f"Protocol {idx}: name='{name}' | chain='{chain}'")
                 
-                if any(x in name for x in ["lfj", "traderjoe", "liquiditybook", "avax"]):
-                    print(f"✅ Matching protocol found: {name}")
-                    for item in protocol.get("portfolio_item_list", []):
+                if any(x in name for x in ["lfj", "traderjoe", "liquiditybook", "joe"]) or "avax" in chain:
+                    print(f"✅ Potential matching protocol: {name}")
+                    for item_idx, item in enumerate(protocol.get("portfolio_item_list", [])):
                         tokens = item.get("supply_token_list", [])
-                        print(f"Portfolio item with {len(tokens)} tokens")
+                        print(f"  Item {item_idx}: {len(tokens)} tokens, USD value: {item.get('usd_value')}")
+                        
                         if len(tokens) >= 2:
+                            token_symbols = [t.get("symbol", "") for t in tokens]
+                            print(f"    Tokens found: {token_symbols}")
+                            
                             sol = next((t for t in tokens if t.get("symbol") in ["SOL", "wSOL"]), None)
                             avax = next((t for t in tokens if t.get("symbol") in ["AVAX", "WAVAX"]), None)
+                            
                             if sol and avax:
-                                print("✅ SOL + AVAX tokens found! LP Position Located.")
+                                print("🎉 SUCCESS: SOL + AVAX LP position found!")
                                 return {
                                     "sol_amount": float(sol.get("amount", 0)),
                                     "avax_amount": float(avax.get("amount", 0))
                                 }
         except Exception as e:
-            print(f"DeBank error on {url}: {e}")
+            print(f"Exception on {url}: {e}")
     
-    print("❌ Could not find SOL/AVAX LP in DeBank response")
+    print("❌ No SOL/AVAX LP position found after checking all responses")
     return None
-
+    
 def get_current_prices():
     data = make_request_with_retry("https://api.coingecko.com/api/v3/simple/price?ids=solana,avalanche-2&vs_currencies=usd")
     if data:
