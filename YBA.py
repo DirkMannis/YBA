@@ -20,7 +20,7 @@ TARGET_SOL_PCT = 60.0
 WARNING_DEVIATION = 20.0
 # =========================================================
 
-print("=== YieldBase SOL/AVAX LP Agent (Full + /check) Starting ===")
+print("=== YieldBase SOL/AVAX LP Agent (Value-Weighted Active Bin) ===")
 
 w3 = Web3(Web3.HTTPProvider(AVAX_RPC))
 
@@ -38,31 +38,30 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
 
 def get_active_bin_ratio():
+    """Returns value-weighted % SOL using active bin reserves"""
     try:
-        get_active_id_abi = '[{"inputs":[],"name":"getActiveId","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"}]'
-        get_reserves_abi = '[{"inputs":[],"name":"getReserves","outputs":[{"internalType":"uint128","name":"reserveX","type":"uint128"},{"internalType":"uint128","name":"reserveY","type":"uint128"}],"stateMutability":"view","type":"function"}]'
-
-        pool = w3.eth.contract(address=w3.to_checksum_address(POOL_ADDRESS), abi=get_active_id_abi)
-        active_id = pool.functions.getActiveId().call()
-
-        pool = w3.eth.contract(address=w3.to_checksum_address(POOL_ADDRESS), abi=get_reserves_abi)
+        # Get reserves
+        reserves_abi = '[{"inputs":[],"name":"getReserves","outputs":[{"internalType":"uint128","name":"reserveX","type":"uint128"},{"internalType":"uint128","name":"reserveY","type":"uint128"}],"stateMutability":"view","type":"function"}]'
+        pool = w3.eth.contract(address=w3.to_checksum_address(POOL_ADDRESS), abi=reserves_abi)
         reserve_x, reserve_y = pool.functions.getReserves().call()
 
         if reserve_x + reserve_y == 0:
             return 50.0
 
-        raw_sol_pct = (reserve_x / (reserve_x + reserve_y)) * 100
-        return round(raw_sol_pct, 1)
+        # Get current prices
+        prices = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana,avalanche-2&vs_currencies=usd", timeout=10).json()
+        sol_price = prices["solana"]["usd"]
+        avax_price = prices["avalanche-2"]["usd"]
+
+        sol_value = reserve_x * sol_price
+        avax_value = reserve_y * avax_price
+        total_value = sol_value + avax_value
+
+        sol_pct = (sol_value / total_value) * 100
+        return round(sol_pct, 1)
     except Exception as e:
         print(f"Active bin error: {e}")
         return 50.0
-
-def get_current_prices():
-    try:
-        data = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana,avalanche-2&vs_currencies=usd", timeout=10).json()
-        return data["solana"]["usd"], data["avalanche-2"]["usd"]
-    except:
-        return 85.0, 9.0
 
 def calculate_rsi(coin_id: str, days=14):
     try:
@@ -79,7 +78,7 @@ def calculate_rsi(coin_id: str, days=14):
         return 50.0
 
 async def send_alert():
-    sol_price, avax_price = get_current_prices()
+    sol_price, avax_price = get_current_prices() if 'get_current_prices' in globals() else (85.0, 9.0)
     current_sol_pct = get_active_bin_ratio()
 
     sol_price_str = f"${sol_price:,.2f}"
@@ -122,12 +121,11 @@ async def send_alert():
     if channel:
         await channel.send(alert)
 
-# Manual slash command
 @bot.tree.command(name="check", description="Check current SOL/AVAX LP status")
 async def check(interaction: discord.Interaction):
     await interaction.response.defer()
     await send_alert()
-    await interaction.followup.send("✅ LP check completed and posted!")
+    await interaction.followup.send("✅ LP check completed!")
 
 @tasks.loop(hours=8)
 async def monitor_lp():
@@ -136,7 +134,7 @@ async def monitor_lp():
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} is online and monitoring your SOL/AVAX pool!")
-    await bot.tree.sync()   # Register slash command
+    await bot.tree.sync()
     await asyncio.sleep(5)
     monitor_lp.start()
     Thread(target=run_flask, daemon=True).start()
