@@ -50,36 +50,50 @@ def make_request_with_retry(url, headers=None, retries=3):
 
 def get_debank_position():
     urls = [
-        f"https://pro-openapi.debank.com/v1/user/complex_protocol_list?id={WALLET}",
-        f"https://pro-openapi.debank.com/v1/user/all_complex_protocol_list?id={WALLET}"
+        f"https://pro-openapi.debank.com/v1/user/all_complex_protocol_list?id={WALLET}",
+        f"https://pro-openapi.debank.com/v1/user/complex_protocol_list?id={WALLET}"
     ]
+    
     headers = {"AccessKey": DEBANK_KEY}
     
     for url in urls:
         try:
-            print(f"Trying DeBank URL...")
-            data = make_request_with_retry(url, headers=headers)
-            if not data or not isinstance(data, list):
+            print(f"Trying DeBank URL: {url}")
+            resp = requests.get(url, headers=headers, timeout=20)
+            print(f"Status Code: {resp.status_code}")
+            
+            if resp.status_code != 200:
+                print(f"Error response: {resp.text[:500]}")
                 continue
                 
-            for protocol in data:
+            data = resp.json()
+            print(f"Response type: {type(data)}, length: {len(str(data)) if isinstance(data, (dict, list)) else 'N/A'}")
+            
+            # If it's a list, iterate protocols
+            protocols = data if isinstance(data, list) else [data]
+            
+            for protocol in protocols:
                 name = str(protocol.get("name", "")).lower()
-                if any(x in name for x in ["lfj", "traderjoe", "liquiditybook"]):
+                print(f"Found protocol: {name}")
+                
+                if any(x in name for x in ["lfj", "traderjoe", "liquiditybook", "avax"]):
+                    print(f"✅ Matching protocol found: {name}")
                     for item in protocol.get("portfolio_item_list", []):
                         tokens = item.get("supply_token_list", [])
+                        print(f"Portfolio item with {len(tokens)} tokens")
                         if len(tokens) >= 2:
                             sol = next((t for t in tokens if t.get("symbol") in ["SOL", "wSOL"]), None)
                             avax = next((t for t in tokens if t.get("symbol") in ["AVAX", "WAVAX"]), None)
                             if sol and avax:
-                                print("✅ SOL/AVAX LP position found!")
+                                print("✅ SOL + AVAX tokens found! LP Position Located.")
                                 return {
                                     "sol_amount": float(sol.get("amount", 0)),
                                     "avax_amount": float(avax.get("amount", 0))
                                 }
         except Exception as e:
-            print(f"DeBank error: {e}")
+            print(f"DeBank error on {url}: {e}")
     
-    print("❌ Could not fetch LP position from DeBank")
+    print("❌ Could not find SOL/AVAX LP in DeBank response")
     return None
 
 def get_current_prices():
