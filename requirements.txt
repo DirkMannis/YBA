@@ -2,3 +2,4 @@ discord.py
 requests
 pandas
 flask
+web3
