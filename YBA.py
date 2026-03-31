@@ -1,70 +1,66 @@
 import discord
 import requests
 import pandas as pd
-from discord.ext import tasks
+from discord.ext import tasks, commands
 from threading import Thread
 from flask import Flask
 from web3 import Web3
 import os
 import asyncio
-import time
-import random
 
 # ========================= CONFIG =========================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-WALLET = "0xA9ad8Ef52D0445b62CbF142d97EF5493501352f3"   # Your position holder
+WALLET = "0xA9ad8Ef52D0445b62CbF142d97EF5493501352f3"
 
-# LFJ Pool Details
-POOL_ADDRESS = "0x640963da1d9d07cb86e89df670dd29b54e1f1d3e"  # Your SOL/AVAX pool
-AVAX_RPC = "https://avalanche-c-chain-rpc.publicnode.com"     # Free public RPC
+POOL_ADDRESS = "0x640963da1d9d07cb86e89df670dd29b54e1f1d3e"
+AVAX_RPC = "https://avalanche-c-chain-rpc.publicnode.com"
 
 TARGET_SOL_PCT = 60.0
 WARNING_DEVIATION = 20.0
 # =========================================================
 
-print("=== YieldBase SOL/AVAX LP Agent (On-Chain) Starting on Railway ===")
+print("=== YieldBase SOL/AVAX LP Agent (Full + /check) Starting ===")
 
-# Connect to Avalanche
 w3 = Web3(Web3.HTTPProvider(AVAX_RPC))
 
 intents = discord.Intents.default()
-bot = discord.Client(intents=intents)
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ YieldBase SOL/AVAX Bot (On-Chain) is running on Railway!"
+    return "✅ YieldBase SOL/AVAX Bot is running!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)))
 
-def get_pool_reserves():
-    """Get current reserves from the LFJ pool (approximation for ratio)"""
+def get_active_bin_ratio():
     try:
-        # Basic ERC20 balanceOf for wrapped tokens if needed, but for ratio we can use pool state
-        # For Liquidity Book, we simplify to current active bin reserves if possible
-        # Fallback: Try to get token0 and token1 reserves if pool exposes them
-        print("Fetching pool reserves from Avalanche...")
-        
-        # Placeholder - in practice we'd call pool-specific view functions
-        # For now, use CoinGecko prices + assume position tracks pool ratio closely
-        # Better future: query LBPair contract for getReserves or active bin
-        
-        return None  # We'll enhance this based on logs
-    except Exception as e:
-        print(f"Pool query error: {e}")
-        return None
+        get_active_id_abi = '[{"inputs":[],"name":"getActiveId","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"}]'
+        get_reserves_abi = '[{"inputs":[],"name":"getReserves","outputs":[{"internalType":"uint128","name":"reserveX","type":"uint128"},{"internalType":"uint128","name":"reserveY","type":"uint128"}],"stateMutability":"view","type":"function"}]'
 
-# Fallback to simple price-based ratio for now (will improve)
-def get_current_ratio():
+        pool = w3.eth.contract(address=w3.to_checksum_address(POOL_ADDRESS), abi=get_active_id_abi)
+        active_id = pool.functions.getActiveId().call()
+
+        pool = w3.eth.contract(address=w3.to_checksum_address(POOL_ADDRESS), abi=get_reserves_abi)
+        reserve_x, reserve_y = pool.functions.getReserves().call()
+
+        if reserve_x + reserve_y == 0:
+            return 50.0
+
+        raw_sol_pct = (reserve_x / (reserve_x + reserve_y)) * 100
+        return round(raw_sol_pct, 1)
+    except Exception as e:
+        print(f"Active bin error: {e}")
+        return 50.0
+
+def get_current_prices():
     try:
-        prices = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana,avalanche-2&vs_currencies=usd", timeout=10).json()
-        sol_price = prices["solana"]["usd"]
-        avax_price = prices["avalanche-2"]["usd"]
-        print(f"Current prices - SOL: ${sol_price}, AVAX: ${avax_price}")
-        return sol_price, avax_price
+        data = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana,avalanche-2&vs_currencies=usd", timeout=10).json()
+        return data["solana"]["usd"], data["avalanche-2"]["usd"]
     except:
         return 85.0, 9.0
 
@@ -82,54 +78,66 @@ def calculate_rsi(coin_id: str, days=14):
     except:
         return 50.0
 
-async def safe_send(message):
-    try:
-        channel = bot.get_channel(CHANNEL_ID)
-        if channel:
-            await asyncio.sleep(3)
-            await channel.send(message)
-    except Exception as e:
-        print(f"Send error: {e}")
+async def send_alert():
+    sol_price, avax_price = get_current_prices()
+    current_sol_pct = get_active_bin_ratio()
 
-@tasks.loop(hours=8)
-async def monitor_lp():
-    sol_price, avax_price = get_current_ratio()
-    
-    # Format prices nicely
     sol_price_str = f"${sol_price:,.2f}"
     avax_price_str = f"${avax_price:,.2f}"
-    
-    # Simple pool ratio approximation (pool-level, not your exact bins yet)
-    # In LB V2, the active bin heavily influences the effective ratio
-    try:
-        # For now we use a balanced approximation; we'll refine with active bin later
-        current_ratio_pct = 60.0  # Placeholder - will improve with on-chain active bin data
-        ratio_str = f"~{current_ratio_pct:.1f}% SOL / {100 - current_ratio_pct:.1f}% AVAX"
-    except:
-        ratio_str = "Calculating..."
-    
+
     rsi_sol = calculate_rsi("solana")
     rsi_avax = calculate_rsi("avalanche-2")
-    
+    deviation = abs(current_sol_pct - TARGET_SOL_PCT)
+
+    if deviation >= WARNING_DEVIATION:
+        if current_sol_pct > TARGET_SOL_PCT:   # SOL overweight
+            if rsi_sol < rsi_avax - 8:
+                suggestion = "Hold — SOL is more oversold (good rebound potential)"
+            else:
+                suggestion = "Rebalance toward AVAX (AVAX is more oversold)"
+        else:  # AVAX overweight
+            if rsi_avax < rsi_sol - 8:
+                suggestion = "Hold — AVAX is more oversold (good rebound potential)"
+            else:
+                suggestion = "Rebalance toward SOL (SOL is more oversold)"
+        
+        if deviation >= 35:
+            suggestion = "🔴 Strongly recommend rebalancing now — " + suggestion
+        status = f"🚨 **Lopsided** — {suggestion}"
+    else:
+        status = "✅ Within acceptable range"
+
     alert = f"""🚨 **SOL/AVAX LP Monitor**
 
 **Current Prices:** SOL {sol_price_str} | AVAX {avax_price_str}
-**Pool Ratio (approx):** {ratio_str}
+**Pool Ratio (Active Bin):** {current_sol_pct:.1f}% SOL / {100 - current_sol_pct:.1f}% AVAX
 **Your Target:** 60% SOL / 40% AVAX
 
-**RSI (14d):** SOL {rsi_sol} | AVAX {rsi_avax}
+**Status:** {status}
 
-*Note: On-chain position & bin reading is being calibrated. This is a good starting approximation.*
+**RSI (14d):** SOL {rsi_sol} | AVAX {rsi_avax}
 """
 
-    await safe_send(alert)
-    print(f"Alert sent - SOL {sol_price_str} | AVAX {avax_price_str}")
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send(alert)
 
+# Manual slash command
+@bot.tree.command(name="check", description="Check current SOL/AVAX LP status")
+async def check(interaction: discord.Interaction):
+    await interaction.response.defer()
+    await send_alert()
+    await interaction.followup.send("✅ LP check completed and posted!")
+
+@tasks.loop(hours=8)
+async def monitor_lp():
+    await send_alert()
 
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} is online and monitoring your SOL/AVAX pool on Railway (On-Chain)!")
-    await asyncio.sleep(8)
+    print(f"✅ {bot.user} is online and monitoring your SOL/AVAX pool!")
+    await bot.tree.sync()   # Register slash command
+    await asyncio.sleep(5)
     monitor_lp.start()
     Thread(target=run_flask, daemon=True).start()
 
