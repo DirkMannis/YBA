@@ -174,7 +174,7 @@ async def monitor_lp():
 
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} is online and monitoring your SOL/AVAX pool!")
+    print(f"✅ {bot.user} is online and monitoring your SOL/AVAX pool")
     await bot.tree.sync()
     await asyncio.sleep(5)
     monitor_lp.start()
